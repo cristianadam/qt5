@@ -1,0 +1,499 @@
+name: CMake Build Matrix
+
+on: [push, pull_request]
+
+env:
+  CMAKE_VERSION: 3.16.2
+  NINJA_VERSION: 1.9.0
+  #QT_CLANG: ON
+  #CLANG_VERSION: 80
+  CLANG_VERSION: 9.0.1-libclang-static
+  BUILD_TYPE: Release
+  CCACHE_VERSION: 3.7.7
+
+jobs:
+  build:
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {
+            name: "Windows Latest MSVC", artifact: "Windows-MSVC",
+            os: windows-latest,
+            cc: "cl", cxx: "cl",
+            environment_script: "C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/VC/Auxiliary/Build/vcvars64.bat"
+          }
+#        - {
+#            name: "Windows Latest MinGW", artifact: "Windows-MinGW",
+#            os: windows-latest,
+#            cc: "gcc", cxx: "g++"
+#          }
+        - {
+            name: "Ubuntu Latest GCC", artifact: "Linux",
+            os: ubuntu-latest,
+            cc: "gcc", cxx: "g++"
+          }
+        - {
+            name: "macOS Latest Clang", artifact: "macOS",
+            os: macos-latest,
+            cc: "clang", cxx: "clang++"
+          }
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Checkout submodules
+      shell: cmake -P {0}
+      run: |
+        execute_process(COMMAND git submodule update --init qtbase)
+        execute_process(COMMAND git submodule update --init qtdeclarative)
+        execute_process(COMMAND git submodule update --init qttools)
+
+    - name: Download Ninja and CMake
+      id: cmake_and_ninja
+      shell: cmake -P {0}
+      run: |
+        set(cmake_version "$ENV{CMAKE_VERSION}")
+        set(ninja_version "$ENV{NINJA_VERSION}")
+
+        if ("${{ runner.os }}" STREQUAL "Windows")
+          set(ninja_suffix "win.zip")
+          set(cmake_suffix "win64-x64.zip")
+          set(cmake_dir "cmake-${cmake_version}-win64-x64/bin")
+        elseif ("${{ runner.os }}" STREQUAL "Linux")
+          set(ninja_suffix "linux.zip")
+          set(cmake_suffix "Linux-x86_64.tar.gz")
+          set(cmake_dir "cmake-${cmake_version}-Linux-x86_64/bin")
+        elseif ("${{ runner.os }}" STREQUAL "macOS")
+          set(ninja_suffix "mac.zip")
+          set(cmake_suffix "Darwin-x86_64.tar.gz")
+          set(cmake_dir "cmake-${cmake_version}-Darwin-x86_64/CMake.app/Contents/bin")
+        endif()
+
+        set(ninja_url "https://github.com/ninja-build/ninja/releases/download/v${ninja_version}/ninja-${ninja_suffix}")
+        file(DOWNLOAD "${ninja_url}" ./ninja.zip SHOW_PROGRESS)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf ./ninja.zip)
+
+        set(cmake_url "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/cmake-${cmake_version}-${cmake_suffix}")
+        file(DOWNLOAD "${cmake_url}" ./cmake.zip SHOW_PROGRESS)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf ./cmake.zip)
+
+        # Save the path for other steps
+        file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}/${cmake_dir}" cmake_dir)
+        message("::set-output name=cmake_dir::${cmake_dir}")
+
+        if (NOT "${{ runner.os }}" STREQUAL "Windows")
+          execute_process(
+            COMMAND chmod +x ninja
+            COMMAND chmod +x ${cmake_dir}/cmake
+          )
+        endif()
+
+    - name: Download libclang
+      id: libclang
+      shell: cmake -P {0}
+      run: |
+        set(clang_version "$ENV{CLANG_VERSION}")
+        set(qt_clang "$ENV{QT_CLANG}")
+
+        if (qt_clang)
+          if ("${{ runner.os }}" STREQUAL "Windows")
+            if ("x${{ matrix.config.environment_script }}" STREQUAL "x")
+              set(libclang "libclang-release_${clang_version}-based-windows-mingw_64.7z")
+            elseif ("${{ matrix.config.environment_script }}" MATCHES "vcvars64.bat")
+              set(libclang "libclang-release_${clang_version}-based-windows-vs2017_64.7z")
+            elseif ("${{ matrix.config.environment_script }}" MATCHES "vcvars32.bat")
+              set(libclang "libclang-release_${clang_version}-based-windows-vs2017_32.7z")
+            endif()
+          elseif ("${{ runner.os }}" STREQUAL "Linux")
+            set(libclang "libclang-release_${clang_version}-based-linux-Ubuntu16.04-gcc5.3-x86_64.7z")
+          elseif ("${{ runner.os }}" STREQUAL "macOS")
+            set(libclang "libclang-release_${clang_version}-based-mac.7z")
+          endif()
+
+          set(libclang_url "https://download.qt.io/development_releases/prebuilt/libclang/${libclang}")
+          file(DOWNLOAD "${libclang_url}" ./libclang.7z SHOW_PROGRESS)
+
+          # Comes with libclang inside the archive
+          execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf ./libclang.7z)
+        else()
+          set(libclang_url "https://github.com/cristianadam/llvm-project/releases/download/v${clang_version}/${{ matrix.config.artifact }}.tar.xz")
+          file(DOWNLOAD "${libclang_url}" ./libclang.tar.xz SHOW_PROGRESS)
+
+          file(MAKE_DIRECTORY libclang)
+          execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf ../libclang.tar.xz WORKING_DIRECTORY libclang)
+        endif()
+
+        # Save the path for other steps
+        file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}/libclang" libclang_dir)
+        message("::set-output name=libclang_dir::${libclang_dir}")
+
+    - name: Download ccache
+      id: ccache
+      shell: cmake -P {0}
+      run: |
+        set(ccache_url "https://github.com/cristianadam/ccache/releases/download/v$ENV{CCACHE_VERSION}/${{ runner.os }}.tar.xz")
+        file(DOWNLOAD "${ccache_url}" ./ccache.tar.xz SHOW_PROGRESS)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf ./ccache.tar.xz)
+
+    - name: Prepare ccache timestamp
+      id: ccache_cache_timestamp
+      shell: cmake -P {0}
+      run: |
+        string(TIMESTAMP current_date "%Y-%m-%d-%H;%M;%S" UTC)
+        message("::set-output name=timestamp::${current_date}")
+
+    - name: ccache cache files
+      uses: actions/cache@v1.1.0
+      with:
+        path: .ccache
+        key: ${{ matrix.config.name }}-ccache-${{ steps.ccache_cache_timestamp.outputs.timestamp }}
+        restore-keys: |
+          ${{ matrix.config.name }}-ccache-
+
+    - name: Install system libs
+      shell: cmake -P {0}
+      run: |
+        if ("${{ runner.os }}" STREQUAL "Linux")
+          execute_process(
+            COMMAND sudo apt update
+          )
+          execute_process(
+            COMMAND sudo apt install libgl1-mesa-dev
+            RESULT_VARIABLE result
+          )
+          if (NOT result EQUAL 0)
+            message(FATAL_ERROR "Failed to install dependencies")
+          endif()
+        endif()
+
+        file(MAKE_DIRECTORY 3rdparty)
+
+    - name: Configure 3rdparty
+      working-directory: 3rdparty
+      shell: cmake -P {0}
+      run: |
+        set(ENV{NINJA_STATUS} "[%f/%t %o/sec] ")
+
+        set(ENV{CC} ${{ matrix.config.cc }})
+        set(ENV{CXX} ${{ matrix.config.cxx }})
+
+        if ("${{ runner.os }}" STREQUAL "Windows" AND NOT "x${{ matrix.config.environment_script }}" STREQUAL "x")
+          execute_process(
+            COMMAND "${{ matrix.config.environment_script }}" && set
+            OUTPUT_FILE environment_script_output.txt
+          )
+          file(STRINGS environment_script_output.txt output_lines)
+          foreach(line IN LISTS output_lines)
+            if (line MATCHES "^([a-zA-Z0-9_-]+)=(.*)$")
+              set(ENV{${CMAKE_MATCH_1}} "${CMAKE_MATCH_2}")
+            endif()
+          endforeach()
+        endif()
+
+        set(path_separator ":")
+        if ("${{ runner.os }}" STREQUAL "Windows")
+          set(path_separator ";")
+        endif()
+        set(ENV{PATH} "$ENV{GITHUB_WORKSPACE}${path_separator}$ENV{PATH}")
+
+        file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}" ccache_basedir)
+        set(ENV{CCACHE_BASEDIR} "${ccache_basedir}")
+        set(ENV{CCACHE_DIR} "${ccache_basedir}/.ccache")
+        set(ENV{CCACHE_COMPRESS} "true")
+        set(ENV{CCACHE_COMPRESSLEVEL} "6")
+        set(ENV{CCACHE_MAXSIZE} "400M")
+        if ("${{ matrix.config.cxx }}" STREQUAL "cl")
+          set(ENV{CCACHE_MAXSIZE} "600M")
+        endif()
+
+        file(WRITE ${ccache_basedir}/toolchain.cmake [=[
+          set(HUNTER_TESTING ON)
+          set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+        ]=])
+
+        file(WRITE CMakeLists.txt [=[
+          cmake_minimum_required(VERSION 3.15)
+
+          set(HUNTER_URL "https://github.com/cpp-pm/hunter/archive/v0.23.244.tar.gz")
+          set(HUNTER_SHA1 "2c0f491fd0b80f7b09e3d21adb97237161ef9835")
+
+          set(HUNTER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/hunter)
+          set(HUNTER_PACKAGES freetype ZLIB PNG double-conversion pcre2)
+
+          set(HUNTER_pcre2_CMAKE_ARGS
+            PCRE2_BUILD_PCRE2_8=OFF
+            PCRE2_BUILD_PCRE2_16=ON
+            PCRE2_BUILD_PCRE2_32=OFF
+          )
+
+          include(FetchContent)
+          FetchContent_Declare(SetupHunter GIT_REPOSITORY https://github.com/cpp-pm/gate)
+          FetchContent_MakeAvailable(SetupHunter)
+
+          project(3rdparty)
+        ]=])
+
+        execute_process(
+          COMMAND ${{ steps.cmake_and_ninja.outputs.cmake_dir }}/cmake
+            -S .
+            -B build
+            -D CMAKE_BUILD_TYPE=$ENV{BUILD_TYPE}
+            -G Ninja
+            -D CMAKE_C_COMPILER_LAUNCHER=ccache
+            -D CMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -D CMAKE_TOOLCHAIN_FILE=${ccache_basedir}/toolchain.cmake
+
+          RESULT_VARIABLE result
+        )
+        if (NOT result EQUAL 0)
+          message(FATAL_ERROR "Bad exit status")
+        endif()
+
+    - name: Configure
+      shell: cmake -P {0}
+      run: |
+        set(ENV{CC} ${{ matrix.config.cc }})
+        set(ENV{CXX} ${{ matrix.config.cxx }})
+
+        if ("${{ runner.os }}" STREQUAL "Windows" AND NOT "x${{ matrix.config.environment_script }}" STREQUAL "x")
+          execute_process(
+            COMMAND "${{ matrix.config.environment_script }}" && set
+            OUTPUT_FILE environment_script_output.txt
+          )
+          file(STRINGS environment_script_output.txt output_lines)
+          foreach(line IN LISTS output_lines)
+            if (line MATCHES "^([a-zA-Z0-9_-]+)=(.*)$")
+              set(ENV{${CMAKE_MATCH_1}} "${CMAKE_MATCH_2}")
+            endif()
+          endforeach()
+        endif()
+
+        set(path_separator ":")
+        if ("${{ runner.os }}" STREQUAL "Windows")
+          set(path_separator ";")
+        endif()
+        set(ENV{PATH} "$ENV{GITHUB_WORKSPACE}${path_separator}$ENV{PATH}")
+
+        # Patching until upstream has the change!
+        file(WRITE qttools/cmake/FindWrapLibClang.cmake [=[
+          if(TARGET WrapLibClang::WrapLibClang)
+            set(WrapLibClang_FOUND TRUE)
+            return()
+          endif()
+
+          find_package(Clang CONFIG)
+
+          if(TARGET libclang AND TARGET clangHandleCXX)
+            get_target_property(type libclang TYPE)
+            if (MSVC AND type STREQUAL "STATIC_LIBRARY")
+              if (NOT CMAKE_BUILD_TYPE MATCHES "(Release|MinSizeRel|RelWithDebInfo)")
+                message(STATUS "Static linkage against libclang with MSVC was requested, but the build is not a release build, therefore libclang cannot be used.")
+                set(WrapLibClang_FOUND FALSE)
+                return()
+              endif()
+            endif()
+
+            add_library(WrapLibClang::WrapLibClang IMPORTED INTERFACE)
+
+            target_include_directories(WrapLibClang::WrapLibClang INTERFACE ${CLANG_INCLUDE_DIRS})
+            if (NOT TARGET Threads::Threads)
+              find_package(Threads)
+            endif()
+            target_link_libraries(WrapLibClang::WrapLibClang INTERFACE libclang clangHandleCXX Threads::Threads)
+
+            foreach(version MAJOR MINOR PATCH)
+              set(QT_LIB_CLANG_VERSION_${version} ${LLVM_VERSION_${version}} CACHE STRING "" FORCE)
+            endforeach()
+            set(QT_LIB_CLANG_VERSION ${LLVM_PACKAGE_VERSION} CACHE STRING "" FORCE)
+            set(QT_LIB_CLANG_LIBDIR "${LLVM_LIBRARY_DIRS}" CACHE STRING "" FORCE)
+            set(QT_LIBCLANG_RESOURCE_DIR "\"${QT_LIB_CLANG_LIBDIR}/clang/${QT_LIB_CLANG_VERSION}/include\"" CACHE STRING "" FORCE)
+
+            set(WrapLibClang_FOUND TRUE)
+          endif()
+        ]=])
+
+        execute_process(
+          COMMAND ${{ steps.cmake_and_ninja.outputs.cmake_dir }}/cmake
+            -S .
+            -B build
+
+            -D CMAKE_BUILD_TYPE=$ENV{BUILD_TYPE}
+
+            -D "CMAKE_PREFIX_PATH=${{ steps.libclang.outputs.libclang_dir }}"
+
+            -D CMAKE_TOOLCHAIN_FILE=3rdparty/build/HunterToolchain.cmake
+            -D CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON
+
+            -G Ninja
+            -D CMAKE_C_COMPILER_LAUNCHER=ccache
+            -D CMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+            -D BUILD_WITH_PCH=OFF
+            -D FEATURE_openssl=OFF
+            -D FEATURE_sql_mysql=OFF
+
+            -D BUILD_qtdeclarative=ON
+            -D BUILD_qttools=ON
+          RESULT_VARIABLE result
+        )
+        if (NOT result EQUAL 0)
+          message(FATAL_ERROR "Bad exit status")
+        endif()
+
+    - name: Build
+      shell: cmake -P {0}
+      run: |
+        set(ENV{NINJA_STATUS} "[%f/%t %o/sec] ")
+
+        if ("${{ runner.os }}" STREQUAL "Windows" AND NOT "x${{ matrix.config.environment_script }}" STREQUAL "x")
+          file(STRINGS environment_script_output.txt output_lines)
+          foreach(line IN LISTS output_lines)
+            if (line MATCHES "^([a-zA-Z0-9_-]+)=(.*)$")
+              set(ENV{${CMAKE_MATCH_1}} "${CMAKE_MATCH_2}")
+            endif()
+          endforeach()
+        endif()
+
+        set(path_separator ":")
+        if ("${{ runner.os }}" STREQUAL "Windows")
+          set(path_separator ";")
+        endif()
+        set(ENV{PATH} "$ENV{GITHUB_WORKSPACE}${path_separator}$ENV{PATH}")
+
+        file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}" ccache_basedir)
+        set(ENV{CCACHE_BASEDIR} "${ccache_basedir}")
+        set(ENV{CCACHE_DIR} "${ccache_basedir}/.ccache")
+        set(ENV{CCACHE_COMPRESS} "true")
+        set(ENV{CCACHE_COMPRESSLEVEL} "6")
+        set(ENV{CCACHE_MAXSIZE} "400M")
+        if ("${{ matrix.config.cxx }}" STREQUAL "cl")
+          set(ENV{CCACHE_MAXSIZE} "600M")
+        endif()
+
+        execute_process(COMMAND ccache -p)
+        execute_process(COMMAND ccache -z)
+
+        execute_process(
+          COMMAND ${{ steps.cmake_and_ninja.outputs.cmake_dir }}/cmake --build build
+          RESULT_VARIABLE result
+        )
+
+        if (NOT result EQUAL 0)
+          message(FATAL_ERROR "Bad exit status")
+        endif()
+
+        execute_process(COMMAND ccache -s)
+
+    - name: Run tests
+      shell: cmake -P {0}
+      run: |
+        include(ProcessorCount)
+        ProcessorCount(N)
+
+        set(ENV{CTEST_OUTPUT_ON_FAILURE} "ON")
+
+        execute_process(
+          COMMAND ${{ steps.cmake_and_ninja.outputs.cmake_dir }}/ctest -j ${N}
+          WORKING_DIRECTORY build
+          RESULT_VARIABLE result
+        )
+
+        # Do not fail on ctest failure
+        #if (NOT result EQUAL 0)
+        #  message(FATAL_ERROR "Running tests failed!")
+        #endif()
+
+
+    - name: Install Strip
+      run: ${{ steps.cmake_and_ninja.outputs.cmake_dir }}/cmake --install build --prefix instdir --strip
+
+    - name: Pack
+      working-directory: instdir
+      run: ${{ steps.cmake_and_ninja.outputs.cmake_dir }}/cmake -E tar cJfv ../${{ matrix.config.artifact }}.tar.xz .
+
+    - name: Upload
+      uses: actions/upload-artifact@v1
+      with:
+        path: ./${{ matrix.config.artifact }}.tar.xz
+        name: ${{ matrix.config.artifact }}.tar.xz
+
+  release:
+    if: contains(github.ref, 'tags/v')
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1.0.0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+
+    - name: Store Release url
+      run: |
+        echo "${{ steps.create_release.outputs.upload_url }}" > ./upload_url
+
+    - uses: actions/upload-artifact@v1
+      with:
+        path: ./upload_url
+        name: upload_url
+
+  publish:
+    if: contains(github.ref, 'tags/v')
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {
+            name: "Windows Latest MSVC", artifact: "Windows-MSVC",
+            os: ubuntu-latest
+          }
+        - {
+            name: "Windows Latest MinGW", artifact: "Windows-MinGW",
+            os: ubuntu-latest
+          }
+        - {
+            name: "Ubuntu Latest GCC", artifact: "Linux",
+            os: ubuntu-latest
+          }
+        - {
+            name: "macOS Latest Clang", artifact: "macOS",
+            os: ubuntu-latest
+          }
+    needs: release
+
+    steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v1
+      with:
+        name: ${{ matrix.config.artifact }}.tar.xz
+        path: ./
+
+    - name: Download URL
+      uses: actions/download-artifact@v1
+      with:
+        name: upload_url
+        path: ./
+    - id: set_upload_url
+      run: |
+        upload_url=`cat ./upload_url`
+        echo ::set-output name=upload_url::$upload_url
+
+    - name: Upload to Release
+      uses: actions/upload-release-asset@v1.0.1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.set_upload_url.outputs.upload_url }}
+        asset_path: ./${{ matrix.config.artifact }}.tar.xz
+        asset_name: ${{ matrix.config.artifact }}.tar.xz
+        asset_content_type: application/x-gtar
